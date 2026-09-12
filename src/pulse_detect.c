@@ -235,8 +235,15 @@ int pulse_detect_package(pulse_detect_t *pulse_detect, int16_t const *envelope_d
 
         case PD_OOK_STATE_GAP_START:
             s->ook_state = PD_OOK_STATE_GAP;
-            // Determine if FSK modulation is detected
-            if (fsk_pulses->num_pulses > PD_MIN_PULSES) {
+            // Determine if FSK modulation is detected (same sustained-pulse
+            // gate for non-first pulses as in the live path above; samp_rate
+            // is used here as samples_per_ms is not in scope yet).
+            int fsk_detected = fsk_pulses->num_pulses > PD_MIN_PULSES;
+            if (fsk_detected && pulses->num_pulses > 0
+                    && pulses->pulse[pulses->num_pulses] <= (int)(samp_rate / 1000)) {
+                fsk_detected = 0;
+            }
+            if (fsk_detected) {
                 // Store last pulse/gap
                 if (fpdm == FSK_PULSE_DETECT_OLD) {
                     pulse_detect_fsk_wrap_up(&s->pulse_detect_fsk, fsk_pulses);
@@ -364,8 +371,9 @@ int pulse_detect_package(pulse_detect_t *pulse_detect, int16_t const *envelope_d
                     // Estimate pulse carrier frequency
                     pulses->fsk_f1_est += fm_data[s->data_counter] / OOK_EST_HIGH_RATIO - pulses->fsk_f1_est / OOK_EST_HIGH_RATIO;
                 }
-                // FSK Demodulation
-                if (pulses->num_pulses == 0) {    // Only during first pulse
+                // FSK Demodulation, evaluated fresh for the first two pulses
+                // only (see restart below); older pulses keep frozen state.
+                if (pulses->num_pulses <= 1) {
                     if (fpdm == FSK_PULSE_DETECT_OLD) {
                         pulse_detect_fsk_classic(&s->pulse_detect_fsk, fm_data[s->data_counter], fsk_pulses);
                     } else {
@@ -383,8 +391,19 @@ int pulse_detect_package(pulse_detect_t *pulse_detect, int16_t const *envelope_d
                 // Or this gap is for real?
                 else if (s->pulse_length >= PD_MIN_PULSE_SAMPLES) {
                     s->ook_state = PD_OOK_STATE_GAP;
-                    // Determine if FSK modulation is detected
-                    if (fsk_pulses->num_pulses > PD_MIN_PULSES) {
+                    // Determine if FSK modulation is detected.
+                    // The second pulse is evaluated with fresh FSK state (restarted
+                    // at each of the first two pulses, e.g. for an FSK burst after
+                    // a short leading sync blip). Additionally require a sustained
+                    // pulse there, so incidental FM chatter on short OOK pulses
+                    // can't steal the package as FSK. The just-finished pulse width
+                    // was stored above at pulses->pulse[pulses->num_pulses].
+                    int fsk_detected = fsk_pulses->num_pulses > PD_MIN_PULSES;
+                    if (fsk_detected && pulses->num_pulses > 0
+                            && pulses->pulse[pulses->num_pulses] <= samples_per_ms) {
+                        fsk_detected = 0;
+                    }
+                    if (fsk_detected) {
                         // Store last pulse/gap
                         if (fpdm == FSK_PULSE_DETECT_OLD) {
                             pulse_detect_fsk_wrap_up(&s->pulse_detect_fsk, fsk_pulses);
@@ -410,8 +429,9 @@ int pulse_detect_package(pulse_detect_t *pulse_detect, int16_t const *envelope_d
                         return PULSE_DATA_FSK;
                     }
                 } // if
-                // FSK Demodulation (continue during short gap - we might return...)
-                if (pulses->num_pulses == 0) {    // Only during first pulse
+                // FSK Demodulation (continue during short gap - we might return...),
+                // evaluated fresh for the first two pulses only (see restart below).
+                if (pulses->num_pulses <= 1) {
                     if (fpdm == FSK_PULSE_DETECT_OLD) {
                         pulse_detect_fsk_classic(&s->pulse_detect_fsk, fm_data[s->data_counter], fsk_pulses);
                     } else {
@@ -440,6 +460,15 @@ int pulse_detect_package(pulse_detect_t *pulse_detect, int16_t const *envelope_d
                     }
 
                     s->pulse_length = 0;
+                    // Restart FSK demodulation for a fresh pulse, but only for
+                    // the first two pulses: a short leading sync blip must not
+                    // shadow a following FSK burst, while older pulses keep
+                    // accumulating exactly like before (prevents FM chatter on
+                    // later OOK pulses from stealing the package as FSK).
+                    if (pulses->num_pulses <= 1) {
+                        pulse_detect_fsk_init(&s->pulse_detect_fsk);
+                        fsk_pulses->num_pulses = 0;
+                    }
                     s->ook_state = PD_OOK_STATE_PULSE;
                 }
 
